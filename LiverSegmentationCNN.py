@@ -12,10 +12,16 @@ from tensorflow.python.keras.layers import Input, Conv2D, Dropout, BatchNormaliz
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras import optimizers
 from tensorflow.python.keras.callbacks import TensorBoard
-from tensorflow.python.keras._impl.keras import backend as K
+from tensorflow.python.keras import backend as K
 import loadData
 import numpy as np
 import SimpleITK as sitk
+from PIL import Image
+import glob
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import pdb
 
 def dice_coef(y_true, y_pred, smooth=1e-5):
     """
@@ -26,6 +32,10 @@ def dice_coef(y_true, y_pred, smooth=1e-5):
     """
     intersection = K.sum(K.abs(y_true * y_pred), axis=-1)
     return (2. * intersection + smooth) / (K.sum(K.square(y_true),-1) + K.sum(K.square(y_pred),-1) + smooth)
+
+def dice_coef_test(y_true, y_pred, smooth=1e-5):
+    intersection = np.sum(np.abs(y_true * y_pred))
+    return (2. * intersection + smooth) / (np.sum(np.square(y_true)) + np.sum(np.square(y_pred)) + smooth)
 
 def dice_coef_loss(y_true, y_pred):
     y_true = K.flatten(y_true[:,:,:,1]) 
@@ -89,34 +99,12 @@ def build_network(Inputshape, num_class):
                        metrics=['accuracy'])
     return FinalModel
 
-def iterate_in_mb_train(train_x, train_y):
+def iterate_in_mb_train(train_x):
     global batch_size
     
     while True:
-        i = np.random.choice(train_x.shape[0], batch_size, replace=False)
-        
-        slices_input = train_x[i[0],:,:,:]
-        slices_target = train_y[i[0],:,:,:]
-        
-        slices_input = slices_input[np.newaxis,:,:,:]
-        slices_target = slices_target[np.newaxis,:,:,:]
-        
-        for p in range(1, int(batch_size)):
-            p_input = train_x[i[p],:,:,:]
-            p_target = train_y[i[p],:,:,:]
-            
-            p_input = p_input[np.newaxis,:,:,:]
-            p_target = p_target[np.newaxis,:,:,:]
-            
-            slices_input = np.concatenate((slices_input, p_input), axis=0)
-            slices_target = np.concatenate((slices_target, p_target), axis=0)
-        
-        mb_labels = np.zeros([slices_target.shape[0], slices_target.shape[1], slices_target.shape[2], 2])
-        neg_target = np.ones([slices_target.shape[0], slices_target.shape[1], slices_target.shape[2], 1])
-        neg_target = neg_target-slices_target
-        mb_labels[:,:,:,0:1] = neg_target
-        mb_labels[:,:,:,1:2] = slices_target
-        
+        selected = np.random.choice(len(train_x), 1, replace=False)
+        slices_input, mb_labels = loadData.loadtrain(train_x[selected[0]], batch_size)
         
         yield slices_input, mb_labels
 
@@ -156,48 +144,83 @@ def imsave(fname, arr):
     #arr = np.swapaxes(arr, 0, 2)
     sitk_img = sitk.GetImageFromArray(arr)
     sitk.WriteImage(sitk_img, fname)
-  
+
+
+def save_prediction(arr, path):
+    fileobj = open(path, mode='wb')
+    off = np.array(arr >= 0.5, dtype=np.int8)
+    off.tofile(fileobj)
+    fileobj.close()
+
+
 n_classes = 2
-batch_size = 1
-train_x, train_y, test_x, test_y = loadData.load_data()
+batch_size = 8
+
+basedir = r'Z:\data4\livertumormri\train20210210_seg_green'
+ckptdir = 'D:\weights\livertumormri\\20200304_tf'
+train_paths = glob.glob(basedir + '\\train3d\data\*.nii')
+test_paths = glob.glob(basedir + '\\val3d\data\*.nii')
 
 ## Training step
-FinalModel = build_network(Inputshape=(322, 322, 6), num_class=2)
+FinalModel = build_network(Inputshape=(322, 322, 1), num_class=2)
  
-tbCallback = TensorBoard(log_dir='/input/logs/2DFCCN_6channels_input_run2',
-                         histogram_freq=0, write_graph=True,
-                         write_images=True)
-n_epochs = 500000
-FinalModel.fit_generator(iterate_in_mb_train(train_x, train_y), 1,
-                         epochs=n_epochs, callbacks=[tbCallback], verbose=0,
-                         validation_data=iterate_in_mb_test(test_x, test_y),
-                         validation_steps=1) 
+# tbCallback = TensorBoard(log_dir=ckptdir,
+#                          histogram_freq=0, write_graph=True,
+#                          write_images=True)
+n_epochs = 1
+n_iter = 10
+for epoch in range(n_epochs):
+    FinalModel.fit_generator(iterate_in_mb_train(train_paths), 1,
+                             epochs=n_iter, verbose=1,
+                             validation_data=iterate_in_mb_train(test_paths),
+                             validation_steps=1)
 
-FinalModel.save_weights('/input/LiverFCNN_2D_6channels_.h5', overwrite=True)
+    FinalModel.save_weights(ckptdir + f'\\LiverFCNN_2D_6channels_{epoch}.h5', overwrite=True)
 
-LiverSegmentation = build_network(Inputshape=(322, 322, 6), num_class=2)
-LiverSegmentation.load_weights('/input/LiverFCNN_2D_6channels_.h5', by_name=False)
+print('Testing Step')
+ckpts = glob.glob(ckptdir + '\\*.h5')
+os.makedirs(os.path.dirname(ckptdir + "/save/"), exist_ok=True)
+for i, ckpt in enumerate(ckpts):
+    LiverSegmentation = build_network(Inputshape=(322, 322, 1), num_class=2)
+    LiverSegmentation.load_weights(ckpt, by_name=False)
+    print('Load model: ', ckpt)
+    dice_list = []
 
-## Testing step
-for t in range(1,4):
-    test_50 = test_x[(t-1)*100,:,:,:]
-    test_50 = test_50[np.newaxis, :, :, :]
-    predict_50 = LiverSegmentation.predict([test_50])
-    predict_50 = np.reshape(predict_50, [256,256,2])
-    prediction = predict_50[:,:,1]
-    prediction = prediction[np.newaxis,:,:]
-    
-    for slice in range(1+((t-1)*100),(t)*100):
-        test_50 = test_x[slice,:,:,:]
-        test_50 = test_50[np.newaxis, :, :, :]
-        predict_50 = LiverSegmentation.predict([test_50])
-        predict_50 = np.reshape(predict_50, [256,256,2])
-        predict_50 = predict_50[:,:,1]*100
-        prediction = np.concatenate((prediction, predict_50[np.newaxis,:,:]), axis=0)
-    
-    imsave('/input/output/FCNN_2D_6channels/result_test_'+str(t)+'_.nii', prediction)
+    for test_path in test_paths:
+        test_x = loadData.read_image(test_path)
+        test_x = test_x.astype('float32')
+        depth, height, width = test_x.shape
+        bg = test_x[0, 0, 0]
+        test_y = loadData.read_mask(
+            os.path.dirname(os.path.dirname(test_path)) + '\\mask\\' + os.path.basename(test_path)[:-4] + '_gt1.raw', depth,
+            height, width)
 
+        prediction_3d = np.zeros((depth, height, width))
+        for j in range(depth):
+            input_x = np.zeros((1, 322, 322, 1))
+            slice_data = test_x[j]
 
+            input_img = Image.fromarray(slice_data)
+            input_img = input_img.resize((256, 256), Image.LANCZOS)
+            slice_data = np.array(input_img)
 
-        
-    
+            train_zeros = np.ones([slice_data.shape[0] + 66, slice_data.shape[1] + 66]) * bg
+            train_zeros[33:-33, 33:-33] = slice_data
+            train_zeros /= 100  # normalization
+
+            input_x[0, :, :, 0] = train_zeros
+            prediction = LiverSegmentation.predict([input_x])
+            try:
+                pred_img = Image.fromarray(prediction[0, :, :, 1])
+                pred_img = pred_img.resize((width, height), Image.LANCZOS)
+                prediction_3d[j] = np.array(pred_img)
+            except:
+                pdb.set_trace()
+
+        dice = dice_coef_test(test_y.astype('float32'), prediction_3d.astype('float32'))
+        print('Test: ', test_path, dice)
+        dice_list.append((test_path, dice))
+        # save_prediction(prediction_3d, ckptdir + "/save/" + str(i + 1) + "_" + os.path.basename(test_path)[:-4] + '.raw')
+
+    dice_df = pd.DataFrame(dice_list, columns=['filepath', 'dice'])
+    dice_df.to_csv(f"{ckptdir}/save/dice_{i}.csv")

@@ -109,3 +109,67 @@ def load_data():
     test_x, test_y = load_test()
     
     return train_x, train_y, test_x, test_y
+
+import numpy as np
+import SimpleITK as sitk
+import os
+import random
+from PIL import Image
+import matplotlib.pyplot as plt
+import pdb
+
+
+def read_image(filename):
+    image = sitk.ReadImage(filename)  # Use ITK to read the image
+    image = sitk.GetArrayFromImage(image)  # Turn ITK image object into a numpy array
+    return image
+
+
+def read_mask(filename, depth, height, width):
+    mask = np.fromfile(filename, dtype='uint8', sep="")
+    mask = mask.reshape([depth, height, width])
+    return mask
+
+
+def loadtrain(path, batch_size):
+    train = read_image(path)
+    train = train.astype('float32')
+    depth, height, width = train.shape
+    bg = train[0, 0, 0]
+
+    y_train = read_mask(os.path.dirname(os.path.dirname(path)) + '\\mask\\' + os.path.basename(path)[:-4] + '_gt1.raw', depth, height, width)
+
+    train_x = np.zeros((batch_size, 322, 322, 1))
+    train_y = np.zeros((batch_size, 256, 256, 2))
+
+    for i in range(batch_size):
+        if random.uniform(0, 1) > 0.3:
+            # load positive sample
+            has_tumor = np.nonzero(y_train)[0]  # z slices that contain tumor
+            selected = np.random.choice(has_tumor, 1)
+        else:
+            # load negative sample
+            selected = np.random.choice(train.shape[0], 1)
+
+        slice_data = train[selected[0]]
+        slice_mask = y_train[selected[0]]
+
+        # resize input data and mask to 256
+        input_img = Image.fromarray(slice_data)
+        input_img = input_img.resize((256, 256), Image.LANCZOS)
+        slice_data = np.array(input_img)
+
+        input_img = Image.fromarray(slice_mask)
+        input_img = input_img.resize((256, 256), Image.LANCZOS)
+        slice_mask = np.array(input_img)
+
+        # Zero padding of 33 in axis 1 and 2
+        train_zeros = np.ones([slice_data.shape[0] + 66, slice_data.shape[1] + 66]) * bg
+        train_zeros[33:-33, 33:-33] = slice_data
+        train_zeros /= 100  # normalization
+
+        train_x[i, :, :, 0] = train_zeros
+        train_y[i, :, :, 1] = slice_mask
+        train_y[i, :, :, 0] = np.ones_like(slice_mask) - slice_mask
+
+    return train_x, train_y
