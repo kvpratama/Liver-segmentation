@@ -224,3 +224,12 @@ for i, ckpt in enumerate(ckpts):
 
     dice_df = pd.DataFrame(dice_list, columns=['filepath', 'dice'])
     dice_df.to_csv(f"{ckptdir}/save/dice_{i}.csv")
+
+dice_files =glob.glob(f"{ckptdir}/save/dice*")
+summary = []
+for epoch, dice_file in enumerate(dice_files):
+    dice_epoch = pd.read_csv(dice_file)
+    avg_dice = dice_epoch.dice.mean()
+    summary.append((dice_file, avg_dice))
+summary_df = pd.DataFrame(summary, columns=['filepath', 'average dice'])
+summary_df.to_csv(f"{ckptdir}/save/summary.csv")
