@@ -20,6 +20,7 @@ from PIL import Image
 import glob
 import os
 import pandas as pd
+from sklearn.metrics import precision_recall_fscore_support
 import matplotlib.pyplot as plt
 import pdb
 
@@ -146,9 +147,9 @@ def imsave(fname, arr):
     sitk.WriteImage(sitk_img, fname)
 
 
-def save_prediction(arr, path):
+def save_prediction(arr, path, threshold=0.5):
     fileobj = open(path, mode='wb')
-    off = np.array(arr >= 0.5, dtype=np.int8)
+    off = np.array(arr >= threshold, dtype=np.int8)
     off.tofile(fileobj)
     fileobj.close()
 
@@ -167,8 +168,9 @@ FinalModel = build_network(Inputshape=(322, 322, 1), num_class=2)
 # tbCallback = TensorBoard(log_dir=ckptdir,
 #                          histogram_freq=0, write_graph=True,
 #                          write_images=True)
-n_epochs = 1
-n_iter = 10
+n_epochs = 0
+n_iter = 500
+threshold = 0.5
 for epoch in range(n_epochs):
     FinalModel.fit_generator(iterate_in_mb_train(train_paths), 1,
                              epochs=n_iter, verbose=1,
@@ -218,11 +220,14 @@ for i, ckpt in enumerate(ckpts):
                 pdb.set_trace()
 
         dice = dice_coef_test(test_y.astype('float32'), prediction_3d.astype('float32'))
+        precision, recall, fscore, support = precision_recall_fscore_support(test_y.flatten(),
+                                                                             prediction_3d.flatten() >= threshold,
+                                                                             average='binary')
         print('Test: ', test_path, dice)
-        dice_list.append((test_path, dice))
+        dice_list.append((test_path, dice, precision, recall, fscore))
         # save_prediction(prediction_3d, ckptdir + "/save/" + str(i + 1) + "_" + os.path.basename(test_path)[:-4] + '.raw')
 
-    dice_df = pd.DataFrame(dice_list, columns=['filepath', 'dice'])
+    dice_df = pd.DataFrame(dice_list, columns=['filepath', 'dice', 'precision', 'recall', 'fscore'])
     dice_df.to_csv(f"{ckptdir}/save/dice_{i}.csv")
 
 dice_files =glob.glob(f"{ckptdir}/save/dice*")
@@ -230,6 +235,9 @@ summary = []
 for epoch, dice_file in enumerate(dice_files):
     dice_epoch = pd.read_csv(dice_file)
     avg_dice = dice_epoch.dice.mean()
-    summary.append((dice_file, avg_dice))
-summary_df = pd.DataFrame(summary, columns=['filepath', 'average dice'])
+    avg_precision = dice_epoch.precision.mean()
+    avg_recall = dice_epoch.recall.mean()
+    avg_fscore = dice_epoch.fscore.mean()
+    summary.append((dice_file, avg_dice, avg_precision, avg_recall, avg_fscore))
+summary_df = pd.DataFrame(summary, columns=['filepath', 'dice', 'precision', 'recall', 'fscore'])
 summary_df.to_csv(f"{ckptdir}/save/summary.csv")
